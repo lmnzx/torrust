@@ -6,4 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.75"
+clap = { version = "4.4.6", features = ["derive"] }
+hex = "0.4.3"
+#request = "0.0.8"
+serde = { version = "1.0.189", features = ["derive"] }
+serde_bencode = "0.2.4"
 serde_json = "1.0.107"
+sha1 = "0.10.6"
