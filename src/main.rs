@@ -16,7 +16,9 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Decodes raw bencode
     Decode { value: String },
+    /// Parses a torrent file and returns info
     Info { torrent: PathBuf },
 }
 
@@ -85,7 +87,8 @@ fn main() -> anyhow::Result<()> {
 
     match args.command {
         Command::Decode { value } => {
-            let v = decode_bencoded_value(&value).0;
+            // let v = decode_bencoded_value(&value).0;
+            let v: serde_json::Value = serde_bencode::from_str(&value).context("bencode to json::Value")?;
             println!("{v}");
         }
         Command::Info { torrent } => {
