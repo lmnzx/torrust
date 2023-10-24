@@ -7,11 +7,19 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
+bytes = "1.5.0"
 clap = { version = "4.4.6", features = ["derive"] }
+futures-core = "0.3.28"
+futures-sink = "0.3.28"
+futures-util = { version = "0.3.28", features = ["sink"] }
 hex = "0.4.3"
+regex = "1.10.2"
 reqwest = { version = "0.11.22", features = ["json", "blocking"] }
 serde = { version = "1.0.189", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_json = "1.0.107"
+serde_urlencoded = "0.7.1"
 sha1 = "0.10.6"
+thiserror = "1.0.50"
 tokio = { version = "1.33.0", features = ["full"] }
+tokio-util = { version = "0.7.9", features = ["full"] }
