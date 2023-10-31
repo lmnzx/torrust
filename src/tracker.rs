@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-pub use peers::Peers;
+use peers::Peers;
 
-/// Note: the info hash field is _not_ included.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerRequest {
     /// A unique identifier for your client.
@@ -43,21 +42,36 @@ pub struct TrackerResponse {
     pub peers: Peers,
 }
 
+pub fn hash_encoder(t: &[u8; 20]) -> String {
+    let mut encoded = String::with_capacity(3 * t.len());
+    for &byte in t {
+        encoded.push('%');
+        encoded.push_str(&hex::encode([byte]))
+    }
+    encoded
+}
+
 mod peers {
-    use serde::de::{self, Deserialize, Deserializer, Visitor};
-    use serde::ser::{Serialize, Serializer};
-    use std::fmt;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::{
+        fmt,
+        net::{Ipv4Addr, SocketAddrV4},
+    };
+
+    use serde::{
+        de::{self, Visitor},
+        Deserialize, Deserializer,
+    };
 
     #[derive(Debug, Clone)]
     pub struct Peers(pub Vec<SocketAddrV4>);
-    struct PeersVisitor;
 
-    impl<'de> Visitor<'de> for PeersVisitor {
+    struct PeerVisitor;
+
+    impl<'de> Visitor<'de> for PeerVisitor {
         type Value = Peers;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("6 bytes, the first 4 bytes are a peer's IP address and the last 2 are a peer's port number")
+            formatter.write_str("a byte string with length multiple of 20")
         }
 
         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
@@ -65,15 +79,14 @@ mod peers {
             E: de::Error,
         {
             if v.len() % 6 != 0 {
-                return Err(E::custom(format!("length is {}", v.len())));
+                return Err(E::custom("lenght is not correct"));
             }
-            // TODO: use array_chunks when stable; then we can also pattern-match in closure args
             Ok(Peers(
                 v.chunks_exact(6)
-                    .map(|slice_6| {
+                    .map(|s| {
                         SocketAddrV4::new(
-                            Ipv4Addr::new(slice_6[0], slice_6[1], slice_6[2], slice_6[3]),
-                            u16::from_be_bytes([slice_6[4], slice_6[5]]),
+                            Ipv4Addr::new(s[0], s[1], s[2], s[3]),
+                            u16::from_be_bytes([s[4], s[5]]),
                         )
                     })
                     .collect(),
@@ -83,24 +96,9 @@ mod peers {
 
     impl<'de> Deserialize<'de> for Peers {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            deserializer.deserialize_bytes(PeersVisitor)
-        }
-    }
-
-    impl Serialize for Peers {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut single_slice = Vec::with_capacity(6 * self.0.len());
-            for peer in &self.0 {
-                single_slice.extend(peer.ip().octets());
-                single_slice.extend(peer.port().to_be_bytes());
-            }
-            serializer.serialize_bytes(&single_slice)
+            where
+                D: Deserializer<'de> {
+            deserializer.deserialize_bytes(PeerVisitor)
         }
     }
 }

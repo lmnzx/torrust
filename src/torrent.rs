@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-use hashes::Hashes;
+use pieces::Pieces;
 
 /// Metainfo file / torrent file
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -27,22 +27,14 @@ impl Torrent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
     /// The suggested name to save the file (or directory) as. It is purely advisory.
-    ///
-    /// In the single file case, the name key is the name of a file, in the muliple file case, it's
-    /// the name of a directory.
     pub name: String,
 
     /// The number of bytes in each piece the file is split into.
-    ///
-    /// For the purposes of transfer, files are split into fixed-size pieces which are all the same
-    /// length except for possibly the last one which may be truncated. piece length is almost
-    /// always a power of two, most commonly 2^18 = 256K (BitTorrent prior to version 3.2 uses 2
-    /// 20 = 1 M as default).
     #[serde(rename = "piece length")]
     pub plength: usize,
 
     /// Each entry of `pieces` is the SHA1 hash of the piece at the corresponding index.
-    pub pieces: Hashes,
+    pub pieces: Pieces,
 
     #[serde(flatten)]
     pub keys: Keys,
@@ -70,24 +62,26 @@ pub struct File {
     pub length: usize,
 
     /// Subdirectory names for this file, the last of which is the actual file name
-    /// (a zero length list is an error case).
     pub path: Vec<String>,
 }
 
-mod hashes {
-    use serde::de::{self, Deserialize, Deserializer, Visitor};
-    use serde::ser::{Serialize, Serializer};
+mod pieces {
+    use serde::{
+        de::{self, Visitor},
+        Deserialize, Deserializer, Serialize, Serializer,
+    };
     use std::fmt;
 
     #[derive(Debug, Clone)]
-    pub struct Hashes(pub Vec<[u8; 20]>);
-    struct HashesVisitor;
+    pub struct Pieces(pub Vec<[u8; 20]>);
 
-    impl<'de> Visitor<'de> for HashesVisitor {
-        type Value = Hashes;
+    struct PiecesVisitor;
+
+    impl<'de> Visitor<'de> for PiecesVisitor {
+        type Value = Pieces;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a byte string whose length is a multiple of 20")
+            formatter.write_str("a byte string with length multiple of 20")
         }
 
         fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
@@ -95,32 +89,30 @@ mod hashes {
             E: de::Error,
         {
             if v.len() % 20 != 0 {
-                return Err(E::custom(format!("lenght is {}", v.len())));
+                return Err(E::custom("length is not correct"));
             }
-            Ok(Hashes(
+            Ok(Pieces(
                 v.chunks_exact(20)
-                    .map(|slice_20| slice_20.try_into().expect("guaranteed to be length 20"))
+                    .map(|s| s.try_into().expect("length is 20"))
                     .collect(),
             ))
         }
     }
 
-    impl<'de> Deserialize<'de> for Hashes {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            deserializer.deserialize_bytes(HashesVisitor)
-        }
+    impl<'de> Deserialize<'de> for Pieces {
+       fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+           where
+               D: Deserializer<'de> {
+           deserializer.deserialize_bytes(PiecesVisitor)
+       } 
     }
 
-    impl Serialize for Hashes {
+    impl Serialize for Pieces {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let single_slice = self.0.concat();
-            serializer.serialize_bytes(&single_slice)
+            where
+                S: Serializer {
+            let slice = self.0.concat();
+            serializer.serialize_bytes(&slice)
         }
     }
 }
