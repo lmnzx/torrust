@@ -1,25 +1,24 @@
 use anyhow::{self, Context, Result};
-use clap::{Parser, Subcommand};
-use serde_bencode;
-use sha1::{Digest, Sha1};
-use std::fs;
-use std::net::SocketAddrV4;
-use std::io::Write;
-use std::path::PathBuf;
 use torrust::peer::{self, *};
 use torrust::torrent::Torrent;
 use torrust::tracker::{self, TrackerRequest, TrackerResponse};
+use clap::{Parser, Subcommand};
+use sha1::{Digest, Sha1};
+use std::fs;
+use std::io::Write;
+use std::net::SocketAddrV4;
+use std::path::PathBuf;
 
-const BLOCK_MAX: u32 = 1 << 14;
+const BLOCK_MAX: u32 = 16384;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about=None)]
 struct Args {
     #[command(subcommand)]
     command: Commands,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug, Subcommand)]
 #[clap(rename_all = "snake_case")]
 enum Commands {
     Decode {
@@ -61,7 +60,7 @@ async fn main() -> Result<()> {
             let torrent = read_torrent(torrent)?;
             let info_hash = torrent.info_hash()?;
             println!("Tracker URL: {}", torrent.announce);
-            println!("Length: {}", torrent.info.plength);
+            println!("Length: {}", torrent.info.length);
             println!("Info Hash: {}", hex::encode(info_hash));
             println!("Piece Length: {}", torrent.info.plength);
             println!("Piece Hashes:");
@@ -112,7 +111,7 @@ async fn get_peers(torrent: &Torrent) -> Result<Vec<SocketAddrV4>> {
         port: 6881,
         uploaded: 0,
         downloaded: 0,
-        left: torrent.info.plength,
+        left: torrent.info.length,
         compact: 1,
     };
 
@@ -194,7 +193,7 @@ async fn download(torrent: PathBuf, output: PathBuf) -> Result<()> {
     assert!(msg_unchocked.payload.is_empty());
     eprintln!("got unchocked");
 
-    let mut pieces: Vec<u8> = Vec::with_capacity(torrent.info.plength);
+    let mut pieces: Vec<u8> = Vec::with_capacity(torrent.info.length);
     for piece_index in 0..torrent.info.pieces.0.len() {
         let path = format!("{}-part-{piece_index}", output.to_str().unwrap()).into();
         let piece = request_piece(&torrent, piece_index, &mut peer, path).await?;
@@ -217,7 +216,7 @@ async fn request_piece(
 ) -> Result<Vec<u8>> {
     let piece_hash = &torrent.info.pieces.0[piece_index];
     let piece_size =
-        (torrent.info.plength).min(torrent.info.plength - torrent.info.plength * piece_index);
+        (torrent.info.plength).min(torrent.info.length - torrent.info.plength * piece_index);
 
     let mut blocks: Vec<u8> = Vec::with_capacity(piece_size);
     loop {
@@ -226,7 +225,7 @@ async fn request_piece(
 
         peer.send_message(Message {
             tag: MessageTag::Request,
-            payload: Vec::from(peer::as_byte_mut(&mut request)),
+            payload: Vec::from(peer::as_bytes_mut(&mut request)),
         })
         .await?;
 

@@ -7,6 +7,7 @@ use serde_json::{self, Value};
 
 pub fn decode_bencoded_value(encoded_value: &str) -> (Value, &str) {
     match encoded_value.chars().next() {
+        // Number encoded
         Some('i') => {
             if let Some((n, rest)) =
                 encoded_value
@@ -21,6 +22,7 @@ pub fn decode_bencoded_value(encoded_value: &str) -> (Value, &str) {
                 return (n.into(), rest);
             }
         }
+        // List encoded
         Some('l') => {
             let mut elems = Vec::new();
             let mut rest = encoded_value.split_at(1).1;
@@ -31,6 +33,7 @@ pub fn decode_bencoded_value(encoded_value: &str) -> (Value, &str) {
             }
             return (elems.into(), &rest[1..]);
         }
+        // List encoded
         Some('d') => {
             let mut dict = serde_json::Map::new();
             let mut rest = encoded_value.split_at(1).1;
@@ -38,7 +41,7 @@ pub fn decode_bencoded_value(encoded_value: &str) -> (Value, &str) {
                 let (k, reminder) = decode_bencoded_value(rest);
                 let k = match k {
                     Value::String(k) => k,
-                    _ => panic!("Invalid Key"),
+                    _ => panic!("invalid key"),
                 };
                 let (v, reminder) = decode_bencoded_value(reminder);
                 dict.insert(k.to_string(), v);
@@ -46,6 +49,7 @@ pub fn decode_bencoded_value(encoded_value: &str) -> (Value, &str) {
             }
             return (dict.into(), &rest[1..]);
         }
+        // String encoded
         Some(c) if c.is_ascii_digit() => {
             if let Some((len, rest)) = encoded_value.split_once(':') {
                 let len = len.parse::<usize>().unwrap();
@@ -54,25 +58,25 @@ pub fn decode_bencoded_value(encoded_value: &str) -> (Value, &str) {
         }
         _ => {}
     }
-    panic!("Unhandled encoded value: {encoded_value}")
+    panic!("Unhandled encoded value: {}", encoded_value)
 }
 
 #[test]
-fn test_decode_str() {
+fn decode_str() {
     let encoded = "4:hola";
     let decoded = decode_bencoded_value(encoded);
     assert_eq!(Value::String("hola".to_string()), decoded.0);
 }
 
 #[test]
-fn test_decode_number() {
+fn decode_number() {
     let encoded = "i52e";
     let decoded = decode_bencoded_value(encoded);
     assert_eq!(Value::Number(52.into()), decoded.0);
 }
 
 #[test]
-fn test_decode_list() {
+fn decode_list() {
     let encoded = "li52e4:holae";
     let decoded = decode_bencoded_value(encoded);
     let expec = Value::Array(vec![
@@ -83,7 +87,7 @@ fn test_decode_list() {
 }
 
 #[test]
-fn test_decode_dict() {
+fn decode_dict() {
     let encoded = "d3:foo3:bar5:helloi52ee";
     let decoded = decode_bencoded_value(encoded);
     let expec = serde_json::json!({"foo":"bar", "hello": 52});

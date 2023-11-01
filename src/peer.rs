@@ -1,11 +1,11 @@
 use std::net::SocketAddrV4;
 
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
 use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub fn as_byte_mut<T: Sized>(data: &mut T) -> &mut [u8] {
+pub fn as_bytes_mut<T: Sized>(data: &mut T) -> &mut [u8] {
     let ptr = data as *mut T as *mut u8;
     let len = std::mem::size_of::<T>();
     unsafe { std::slice::from_raw_parts_mut(ptr, len) }
@@ -51,13 +51,11 @@ impl Request {
     pub fn index(&self) -> u32 {
         u32::from_be_bytes(self.index)
     }
-
     pub fn begin(&self) -> u32 {
-        u32::from_be_bytes(self.index)
+        u32::from_be_bytes(self.begin)
     }
-
-    pub fn length(self) -> u32 {
-        u32::from_be_bytes(self.index)
+    pub fn length(&self) -> u32 {
+        u32::from_be_bytes(self.length)
     }
 }
 
@@ -80,11 +78,9 @@ impl Piece {
     pub fn index(&self) -> u32 {
         u32::from_be_bytes(self.index)
     }
-
     pub fn begin(&self) -> u32 {
         u32::from_be_bytes(self.begin)
     }
-
     pub fn block(&self) -> &[u8] {
         &self.block
     }
@@ -112,7 +108,7 @@ impl Message {
     }
 }
 
-#[repr(C)]
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MessageTag {
     Choke = 0,
@@ -139,7 +135,7 @@ impl MessageTag {
             7 => MessageTag::Piece,
             8 => MessageTag::Cancel,
             tag => {
-                return Err(anyhow::anyhow!("unknown tag: {}", tag));
+                return Err(anyhow::anyhow!("Unknown tag: {}", tag));
             }
         };
         Ok(message_tag)
@@ -152,6 +148,9 @@ pub struct Peer {
 }
 
 impl Peer {
+    /// Creates a new Peer, by creating a Tcp stream, then attempting a Handshake
+    /// with the given peer address
+    /// Returns an error if the handshake fails.
     pub async fn connect_peer(peer: SocketAddrV4, info_hash: [u8; 20]) -> Result<Self> {
         let mut connection = TcpStream::connect(peer)
             .await
@@ -159,14 +158,17 @@ impl Peer {
 
         let mut handshake = Handshake::new(info_hash, *b"00112233445566778899");
 
+        // Drops unsafe slice pointer after reading it
         {
-            let bytes = as_byte_mut(&mut handshake);
+            // Generates a mutable slice pointer to handshake
+            let bytes = as_bytes_mut(&mut handshake);
 
             connection
                 .write_all(bytes)
                 .await
-                .context("recieving handshake")?;
+                .context("sending request")?;
 
+            // Reads to the same bytes slice pointing to the handshake struct
             connection
                 .read_exact(bytes)
                 .await
@@ -202,6 +204,7 @@ impl Peer {
         let message_tag = MessageTag::from_u8(tag)?;
 
         let mut payload: Vec<u8> = vec![0; message_length as usize - 1];
+        // Read a message of length message_length - 1 (message_tag is already read)
         self.stream.read_exact(&mut payload).await?;
 
         let message = Message {

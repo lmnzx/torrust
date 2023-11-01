@@ -1,74 +1,39 @@
 use anyhow::Result;
+use pieces::Pieces;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-use pieces::Pieces;
-
-/// Metainfo file / torrent file
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Torrent {
-    /// The URL of the tracker
     pub announce: String,
-
     pub info: Info,
 }
 
 impl Torrent {
     pub fn info_hash(&self) -> Result<[u8; 20]> {
-        let info_encoded = serde_bencode::to_bytes(&self.info).expect("re-encode info section");
         let mut hasher = Sha1::new();
-        hasher.update(&info_encoded);
+        let encoded = serde_bencode::to_bytes(&self.info)?;
+        hasher.update(&encoded);
         Ok(hasher.finalize().try_into()?)
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
-    /// The suggested name to save the file (or directory) as. It is purely advisory.
+    pub length: usize,
     pub name: String,
-
-    /// The number of bytes in each piece the file is split into.
     #[serde(rename = "piece length")]
     pub plength: usize,
-
-    /// Each entry of `pieces` is the SHA1 hash of the piece at the corresponding index.
     pub pieces: Pieces,
-
-    #[serde(flatten)]
-    pub keys: Keys,
-}
-
-/// There is a key `length` or a key `files`, but not both or neither.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum Keys {
-    /// If `length` is present then the download represents a single file.
-    SingleFile {
-        /// The length of the file in bytes.
-        length: usize,
-    },
-    /// Otherwise it represents a set of files which go in a directory structure.
-    ///
-    /// For the purposes of the other keys in `Info`, the multi-file case is treated as only having
-    /// a single file by concatenating the files in the order they appear in the files list.
-    MultiFile { files: Vec<File> },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct File {
-    /// The length of the file, in bytes.
-    pub length: usize,
-
-    /// Subdirectory names for this file, the last of which is the actual file name
-    pub path: Vec<String>,
 }
 
 mod pieces {
+    use std::fmt;
+
     use serde::{
         de::{self, Visitor},
         Deserialize, Deserializer, Serialize, Serializer,
     };
-    use std::fmt;
 
     #[derive(Debug, Clone)]
     pub struct Pieces(pub Vec<[u8; 20]>);
