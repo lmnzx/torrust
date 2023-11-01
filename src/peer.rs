@@ -1,12 +1,21 @@
-use bytes::{Buf, BufMut, BytesMut};
-use tokio_util::codec::Decoder;
-use tokio_util::codec::Encoder;
+use std::net::SocketAddrV4;
+
+use anyhow::{Context, Ok, Result};
+use bytes::{BufMut, BytesMut};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+pub fn as_byte_mut<T: Sized>(data: &mut T) -> &mut [u8] {
+    let ptr = data as *mut T as *mut u8;
+    let len = std::mem::size_of::<T>();
+    unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+}
 
 #[repr(C)]
 pub struct Handshake {
     pub length: u8,
-    pub bittorrent: [u8; 19],
-    pub reserved: [u8; 8],
+    pub protocol: [u8; 19],
+    pub reserved_bytes: [u8; 8],
     pub info_hash: [u8; 20],
     pub peer_id: [u8; 20],
 }
@@ -15,18 +24,11 @@ impl Handshake {
     pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
         Self {
             length: 19,
-            bittorrent: *b"BitTorrent protocol",
-            reserved: [0; 8],
+            protocol: *b"BitTorrent protocol",
+            reserved_bytes: [0; 8],
             info_hash,
             peer_id,
         }
-    }
-
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        let bytes = self as *mut Self as *mut [u8; std::mem::size_of::<Self>()];
-        // Safety: Handshake is a POD with repr(c)
-        let bytes: &mut [u8; std::mem::size_of::<Self>()] = unsafe { &mut *bytes };
-        bytes
     }
 }
 
@@ -51,29 +53,30 @@ impl Request {
     }
 
     pub fn begin(&self) -> u32 {
-        u32::from_be_bytes(self.begin)
+        u32::from_be_bytes(self.index)
     }
 
-    pub fn length(&self) -> u32 {
-        u32::from_be_bytes(self.length)
-    }
-
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        let bytes = self as *mut Self as *mut [u8; std::mem::size_of::<Self>()];
-        // Safety: Handshake is a POD with repr(c)
-        let bytes: &mut [u8; std::mem::size_of::<Self>()] = unsafe { &mut *bytes };
-        bytes
+    pub fn length(self) -> u32 {
+        u32::from_be_bytes(self.index)
     }
 }
 
-#[repr(C)]
-pub struct Piece<T: ?Sized = [u8]> {
+#[derive(Debug)]
+pub struct Piece {
     index: [u8; 4],
     begin: [u8; 4],
-    block: T,
+    block: Vec<u8>,
 }
 
 impl Piece {
+    pub fn from_u8(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            index: bytes[..4].try_into()?,
+            begin: bytes[4..8].try_into()?,
+            block: bytes[8..].to_vec(),
+        })
+    }
+
     pub fn index(&self) -> u32 {
         u32::from_be_bytes(self.index)
     }
@@ -85,28 +88,32 @@ impl Piece {
     pub fn block(&self) -> &[u8] {
         &self.block
     }
+}
 
-    const PIECE_LEAD: usize = std::mem::size_of::<Piece<()>>();
-    pub fn ref_from_bytes(data: &[u8]) -> Option<&Self> {
-        if data.len() < Self::PIECE_LEAD {
-            return None;
-        }
-        let n = data.len();
-        // NOTE: The slicing here looks really weird. The reason we do it is because we need the
-        // length part of the fat pointer to Piece to old the length of _just_ the `block` field.
-        // And the only way we can change the length of the fat pointer to Piece is by changing the
-        // length of the fat pointer to the slice, which we do by slicing it. We can't slice it at
-        // the front (as it would invalidate the ptr part of the fat pointer), so we slice it at
-        // the back!
-        let piece = &data[..n - Self::PIECE_LEAD] as *const [u8] as *const Piece;
-        // Safety: Piece is a POD with repr(c), _and_ the fat pointer data length is the length of
-        // the trailing DST field (thanks to the PIECE_LEAD offset).
-        Some(unsafe { &*piece })
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub tag: MessageTag,
+    pub payload: Vec<u8>,
+}
+
+impl Message {
+    fn to_bytes(&self) -> BytesMut {
+        let mut buffer = BytesMut::new();
+
+        // length is the payload + the message tag 1
+        let len_slice = u32::to_be_bytes(self.payload.len() as u32 + 1);
+
+        buffer.reserve(4 + self.payload.len() + 1);
+
+        buffer.extend_from_slice(&len_slice);
+        buffer.put_u8(self.tag as u8);
+        buffer.extend_from_slice(&self.payload);
+        buffer
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MessageTag {
     Choke = 0,
     Unchoke = 1,
@@ -119,68 +126,9 @@ pub enum MessageTag {
     Cancel = 8,
 }
 
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub tag: MessageTag,
-    pub payload: Vec<u8>,
-}
-
-pub struct MessageFramer;
-
-const MAX: usize = 1 << 16;
-
-impl Decoder for MessageFramer {
-    type Item = Message;
-    type Error = std::io::Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            // Not enough data to read length marker.
-            return Ok(None);
-        }
-
-        // Read length marker.
-        let mut length_bytes = [0u8; 4];
-        length_bytes.copy_from_slice(&src[..4]);
-        let length = u32::from_be_bytes(length_bytes) as usize;
-
-        if length == 0 {
-            // this is a heartbeat message.
-            // discard it.
-            src.advance(4);
-            // and then try again in case the buffer has more messages
-            return self.decode(src);
-        }
-
-        if src.len() < 5 {
-            // Not enough data to read tag marker.
-            return Ok(None);
-        }
-
-        // Check that the length is not too large to avoid a denial of
-        // service attack where the server runs out of memory.
-        if length > MAX {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Frame of length {} is too large.", length),
-            ));
-        }
-
-        if src.len() < 4 + length {
-            // The full string has not yet arrived.
-            //
-            // We reserve more space in the buffer. This is not strictly
-            // necessary, but is a good idea performance-wise.
-            src.reserve(4 + length - src.len());
-
-            // We inform the Framed that we need more bytes to form the next
-            // frame.
-            return Ok(None);
-        }
-
-        // Use advance to modify src such that it no longer contains
-        // this frame.
-        let tag = match src[4] {
+impl MessageTag {
+    fn from_u8(tag: u8) -> Result<Self> {
+        let message_tag = match tag {
             0 => MessageTag::Choke,
             1 => MessageTag::Unchoke,
             2 => MessageTag::Interested,
@@ -191,46 +139,75 @@ impl Decoder for MessageFramer {
             7 => MessageTag::Piece,
             8 => MessageTag::Cancel,
             tag => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Unknown message type {}.", tag),
-                ))
+                return Err(anyhow::anyhow!("unknown tag: {}", tag));
             }
         };
-        let data = if src.len() > 5 {
-            src[5..4 + length].to_vec()
-        } else {
-            Vec::new()
-        };
-        src.advance(4 + length);
-
-        Ok(Some(Message { tag, payload: data }))
+        Ok(message_tag)
     }
 }
 
-impl Encoder<Message> for MessageFramer {
-    type Error = std::io::Error;
+pub struct Peer {
+    stream: TcpStream,
+    pub peer_id: [u8; 20],
+}
 
-    fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        // Don't send a message if it is longer than the other end will
-        // accept.
-        if item.payload.len() + 1 > MAX {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Frame of length {} is too large.", item.payload.len()),
-            ));
+impl Peer {
+    pub async fn connect_peer(peer: SocketAddrV4, info_hash: [u8; 20]) -> Result<Self> {
+        let mut connection = TcpStream::connect(peer)
+            .await
+            .context("connecting to peer")?;
+
+        let mut handshake = Handshake::new(info_hash, *b"00112233445566778899");
+
+        {
+            let bytes = as_byte_mut(&mut handshake);
+
+            connection
+                .write_all(bytes)
+                .await
+                .context("recieving handshake")?;
+
+            connection
+                .read_exact(bytes)
+                .await
+                .context("recieving handshake")?;
         }
+        Ok(Self {
+            stream: connection,
+            peer_id: handshake.peer_id,
+        })
+    }
 
-        // Convert the length into a byte array.
-        let len_slice = u32::to_be_bytes(item.payload.len() as u32 + 1);
+    pub async fn send_message(&mut self, message: Message) -> Result<()> {
+        eprintln!("Sending message: {:?}", message);
+        let bytes = message.to_bytes();
+        self.stream.write_all(&bytes).await?;
 
-        // Reserve space in the buffer.
-        dst.reserve(4 /* length */ + 1 /* tag */ + item.payload.len());
+        eprintln!("Message sent!\n");
 
-        // Write the length and string to the buffer.
-        dst.extend_from_slice(&len_slice);
-        dst.put_u8(item.tag as u8);
-        dst.extend_from_slice(&item.payload);
         Ok(())
+    }
+
+    pub async fn read_message(&mut self) -> Result<Message> {
+        let mut message_length: [u8; 4] = [0; 4];
+
+        self.stream.read_exact(&mut message_length).await?;
+
+        let message_length = u32::from_be_bytes(message_length);
+
+        let mut message_type: [u8; 1] = [0; 1];
+        self.stream.read_exact(&mut message_type).await?;
+
+        let tag = message_type[0];
+        let message_tag = MessageTag::from_u8(tag)?;
+
+        let mut payload: Vec<u8> = vec![0; message_length as usize - 1];
+        self.stream.read_exact(&mut payload).await?;
+
+        let message = Message {
+            tag: message_tag,
+            payload,
+        };
+        Ok(message)
     }
 }

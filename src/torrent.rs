@@ -1,3 +1,4 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -13,14 +14,11 @@ pub struct Torrent {
 }
 
 impl Torrent {
-    pub fn info_hash(&self) -> [u8; 20] {
+    pub fn info_hash(&self) -> Result<[u8; 20]> {
         let info_encoded = serde_bencode::to_bytes(&self.info).expect("re-encode info section");
         let mut hasher = Sha1::new();
         hasher.update(&info_encoded);
-        hasher
-            .finalize()
-            .try_into()
-            .expect("GenericArray<_, 20> ==  [_;20]")
+        Ok(hasher.finalize().try_into()?)
     }
 }
 
@@ -100,17 +98,19 @@ mod pieces {
     }
 
     impl<'de> Deserialize<'de> for Pieces {
-       fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-           where
-               D: Deserializer<'de> {
-           deserializer.deserialize_bytes(PiecesVisitor)
-       } 
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_bytes(PiecesVisitor)
+        }
     }
 
     impl Serialize for Pieces {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer {
+        where
+            S: Serializer,
+        {
             let slice = self.0.concat();
             serializer.serialize_bytes(&slice)
         }
